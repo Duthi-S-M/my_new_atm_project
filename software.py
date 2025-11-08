@@ -3,11 +3,12 @@ import os
 import numpy as np
 import random
 import csv
+import sys
 import face_recognition
 from tkinter import *
 from PIL import Image, ImageTk
 
-# -------------------- PATHS --------------------
+# Paths
 face_cascade_path = 'face_detection_model/deploy.prototxt'
 face_model_path = 'face_detection_model/res10_300x300_ssd_iter_140000.caffemodel'
 dataset_path = 'dataset/'
@@ -19,47 +20,52 @@ face_detector = cv2.dnn.readNetFromCaffe(face_cascade_path, face_model_path)
 # Ensure dataset directory exists
 os.makedirs(dataset_path, exist_ok=True)
 
-# -------------------- GUI --------------------
+#GUI
 root = Tk()
 root.title("ATM System")
-
-# -------------------- FACE FUNCTIONS --------------------
+#creating main window
 def detect_face(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    faces = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml").detectMultiScale(gray, 1.3, 5)
+    faces = cv2.CascadeClassifier(
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    ).detectMultiScale(gray, 1.3, 5)
     return faces
 
 def capture_face(account_no):
     cap = cv2.VideoCapture(0)
+    count = 0
     while True:
         ret, frame = cap.read()
         if not ret:
             break
         faces = detect_face(frame)
         for (x, y, w, h) in faces:
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            count += 1
             face_img = frame[y:y + h, x:x + w]
-            cv2.imwrite(os.path.join(dataset_path, f"{account_no}.jpg"), face_img)
-            cv2.imshow("Capturing Face - Press q to exit", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+            file_path = os.path.join(dataset_path, f"{account_no}_{count}.jpg")
+            cv2.imwrite(file_path, face_img)
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            cv2.putText(frame, f"Capturing {count}/10", (50, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
+        cv2.imshow("Capturing Face - Press q to exit", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q') or count >= 10:
             break
     cap.release()
     cv2.destroyAllWindows()
 
-
 def verify_face(account_no):
-    # Load registered face
-    registered_face_path = os.path.join(dataset_path, f"{account_no}.jpg")
-    if not os.path.exists(registered_face_path):
+    registered_encodings = []
+    for file in os.listdir(dataset_path):
+        if file.startswith(account_no):
+            img_path = os.path.join(dataset_path, file)
+            image = face_recognition.load_image_file(img_path)
+            enc = face_recognition.face_encodings(image)
+            if enc:
+                registered_encodings.append(enc[0])
+
+    if not registered_encodings:
         return False
 
-    registered_image = face_recognition.load_image_file(registered_face_path)
-    registered_encoding = face_recognition.face_encodings(registered_image)
-    if not registered_encoding:
-        return False
-    registered_encoding = registered_encoding[0]
-
-    # Capture from webcam
     cap = cv2.VideoCapture(0)
     face_matched = False
 
@@ -72,12 +78,19 @@ def verify_face(account_no):
         face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
 
         for encoding in face_encodings:
-            matches = face_recognition.compare_faces([registered_encoding], encoding)
-            if True in matches:
+            matches = face_recognition.compare_faces(registered_encodings, encoding, tolerance=0.45)
+            face_distance = face_recognition.face_distance(registered_encodings, encoding)
+            if len(face_distance) == 0:
+                continue
+            best_match_index = np.argmin(face_distance)
+
+            if matches[best_match_index] and face_distance[best_match_index] < 0.45:
                 face_matched = True
-                cv2.putText(frame, "Face Verified", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                cv2.putText(frame, f"Verified ({face_distance[best_match_index]:.2f})", (50, 50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             else:
-                cv2.putText(frame, "Face Not Matched", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                cv2.putText(frame, "Not Matched", (50, 50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
         cv2.imshow("Face Verification - Press q to confirm", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -86,7 +99,6 @@ def verify_face(account_no):
     cap.release()
     cv2.destroyAllWindows()
     return face_matched
-
 
 # -------------------- HELPER FUNCTIONS --------------------
 def generate_unique_account():
@@ -115,17 +127,16 @@ def register_user():
     account_no = generate_unique_account()
     pin = generate_unique_pin()
 
-    # Save to CSV
     file_exists = os.path.exists(bank_csv)
     with open(bank_csv, 'a', newline='') as f:
         writer = csv.writer(f)
         if not file_exists:
-            writer.writerow(['AccountNo','PIN','Name','Phone','Email','Balance'])
+            writer.writerow(['AccountNo', 'PIN', 'Name', 'Phone', 'Email', 'Balance'])
         writer.writerow([account_no, pin, name, phone, email, balance])
 
-    # Capture face
+    status_label.config(text="Capturing face samples, please look at the camera...")
+    root.update()
     capture_face(account_no)
-
     status_label.config(text=f"Registered! Account No: {account_no}, PIN: {pin}")
 
 # -------------------- LOGIN --------------------
@@ -146,7 +157,7 @@ def login_user():
     with open(bank_csv, 'r') as f:
         reader = csv.reader(f)
         for row in reader:
-            if not row:
+            if not row or row[0] == "AccountNo":
                 continue
             if row[0] == account_no and row[1] == pin:
                 user_found = True
@@ -157,7 +168,6 @@ def login_user():
         login_status_label.config(text="Invalid Account No or PIN")
         return
 
-    # Face verification
     login_status_label.config(text="Please verify your face using webcam")
     root.update()
     if verify_face(account_no):
@@ -167,84 +177,120 @@ def login_user():
         login_status_label.config(text="Face verification failed! Access Denied")
 
 # -------------------- ATM FUNCTIONS --------------------
+
 def show_atm_options(account_no):
     atm_window = Toplevel(root)
     atm_window.title("ATM Operations")
 
-    # Balance display
-    balance_lbl = Label(atm_window, text="")
-    balance_lbl.pack()
+    balance_lbl = Label(atm_window, text="", font=("Arial", 12, "bold"))
+    balance_lbl.pack(pady=5)
 
-    # Status label
-    atm_status_lbl = Label(atm_window, text="")
+    atm_status_lbl = Label(atm_window, text="", fg="blue")
     atm_status_lbl.pack(pady=5)
 
+    # ✅ Read data safely (ignore blank lines and clean spaces)
+    def read_data():
+        rows = []
+        with open(bank_csv, 'r', newline='') as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if not row or all(not c.strip() for c in row):
+                    continue  # skip empty rows
+                rows.append([c.strip() for c in row])
+        return rows
+
+    # ✅ Write clean data back to CSV
+    def write_data(rows):
+        with open(bank_csv, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerows(rows)
+
+    # ✅ Show current balance
     def update_balance():
-        with open(bank_csv, 'r') as f:
-            reader = list(csv.reader(f))
-        for row in reader:
-            if row[0] == account_no:
-                balance_lbl.config(text=f"Balance: ₹{row[5]}")
+        rows = read_data()
+        for row in rows[1:]:  # Skip header
+            if row[0].strip() == account_no.strip():
+                balance_lbl.config(text=f"Current Balance: ₹{row[5]}")
                 break
 
+    # ✅ Deposit Function
     def deposit_amount():
-        amt = deposit_entry.get()
-        if not amt.isdigit():
+        amt = deposit_entry.get().strip()
+        if not amt.isdigit() or int(amt) <= 0:
             atm_status_lbl.config(text="Enter valid amount")
             return
         amt = int(amt)
-        rows = list(csv.reader(open(bank_csv)))
-        for row in rows:
-            if row[0] == account_no:
-                row[5] = str(int(row[5]) + amt)
-        with open(bank_csv, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerows(rows)
-        atm_status_lbl.config(text=f"Deposited ₹{amt}")
+        rows = read_data()
+        for row in rows[1:]:  # Skip header
+            if row[0].strip() == account_no.strip():
+                current_balance = int(row[5])
+                row[5] = str(current_balance + amt)
+                atm_status_lbl.config(text=f"Deposited ₹{amt} successfully!")
+                break
+        write_data(rows)
         update_balance()
+        deposit_entry.delete(0, END)
 
+    # ✅ Withdraw Function
     def withdraw_amount():
-        amt = withdraw_entry.get()
-        if not amt.isdigit():
+        amt = withdraw_entry.get().strip()
+        if not amt.isdigit() or int(amt) <= 0:
             atm_status_lbl.config(text="Enter valid amount")
             return
         amt = int(amt)
-        rows = list(csv.reader(open(bank_csv)))
-        for row in rows:
-            if row[0] == account_no:
-                if int(row[5]) < amt:
+        rows = read_data()
+        for row in rows[1:]:  # Skip header
+            if row[0].strip() == account_no.strip():
+                current_balance = int(row[5])
+                if current_balance < amt:
                     atm_status_lbl.config(text="Insufficient Balance")
                     return
-                row[5] = str(int(row[5]) - amt)
-        with open(bank_csv, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerows(rows)
-        atm_status_lbl.config(text=f"Withdrawn ₹{amt}")
+                row[5] = str(current_balance - amt)
+                atm_status_lbl.config(text=f"Withdrawn ₹{amt} successfully!")
+                break
+        write_data(rows)
         update_balance()
+        withdraw_entry.delete(0, END)
+
+
+
 
     def logout():
-        atm_window.destroy()  # Close the ATM window and return to login
+        atm_window.destroy()
         login_status_label.config(text="You have logged out successfully.")
 
-    # Deposit
     Label(atm_window, text="Deposit Amount:").pack()
     deposit_entry = Entry(atm_window)
     deposit_entry.pack()
     Button(atm_window, text="Deposit", command=deposit_amount).pack(pady=5)
 
-    # Withdraw
     Label(atm_window, text="Withdraw Amount:").pack()
     withdraw_entry = Entry(atm_window)
     withdraw_entry.pack()
     Button(atm_window, text="Withdraw", command=withdraw_amount).pack(pady=5)
 
-    # Exit button
     Button(atm_window, text="Logout / Exit", command=logout, bg="red", fg="white").pack(pady=10)
 
     update_balance()
 
+# -------------------- SAFE EXIT HANDLER --------------------
+def on_closing():
+    print("Application closed safely.")
+    try:
+        cv2.destroyAllWindows()
+        for i in range(5):
+            cap = cv2.VideoCapture(i)
+            if cap.isOpened():
+                cap.release()
+    except Exception as e:
+        print("Error closing camera:", e)
+    root.destroy()
+    sys.exit(0)
+
+root.protocol("WM_DELETE_WINDOW", on_closing)
+
 # -------------------- GUI ELEMENTS --------------------
-Label(root, text="--- Registration ---").pack(pady=5)
+Label(root, text="--- REGISTRATION ---", font=("Arial", 14, "bold")).pack(pady=5)
 Label(root, text="Name:").pack()
 name_entry = Entry(root)
 name_entry.pack()
@@ -262,7 +308,7 @@ Button(root, text="Register", command=register_user).pack(pady=5)
 status_label = Label(root, text="")
 status_label.pack(pady=5)
 
-Label(root, text="--- Login ---").pack(pady=10)
+Label(root, text="--- LOGIN ---", font=("Arial", 14, "bold")).pack(pady=10)
 Label(root, text="Account Number:").pack()
 account_entry = Entry(root)
 account_entry.pack()
